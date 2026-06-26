@@ -955,10 +955,10 @@ function LandingPage({ onSignIn, onRegister }: { onSignIn: () => void; onRegiste
             <p className="text-sm text-slate-500 leading-relaxed max-w-[280px]">
               Secure digital elections for Ateneo de Naga University, built for transparent voting and accountable campus governance.
             </p>
-            <a href="mailto:voterhub@adnu.edu.ph" className="text-xs font-bold text-[#0A2540] hover:underline underline-offset-4 w-fit">
+            <a href="mailto:votehub@adnu.edu.ph" className="text-xs font-bold text-[#0A2540] hover:underline underline-offset-4 w-fit">
               voterhub@adnu.edu.ph
             </a>
-            <small className="text-[11px] text-slate-400 mt-8">© 2026 Ateneo de Naga University | Unmatched Egoist. All rights reserved.</small>
+            <small className="text-[11px] text-slate-400 mt-8">© 2026 Unmatched Egoist. All rights reserved.</small>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-8">
             {[
