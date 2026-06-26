@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # VoteHub
 
 VoteHub is a secure digital election platform for Ateneo de Naga University. It includes student voting flows, election results, administration screens, analytics, candidate management, and branded public pages.
@@ -32,3 +33,6 @@ The backend workspace is prepared in `backend/`. Add API, database, authenticati
 ## Repository
 
 Remote: `https://github.com/auxomeness/VoteHub.git`
+=======
+Hello, myNaga!
+>>>>>>> e7e7e7d5d7d4d7772c5dd36a0c67cc39d71ceb7e
