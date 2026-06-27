@@ -1,0 +1,80 @@
+from enum import Enum
+
+
+class UserStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    PENDING = "PENDING"
+    REJECTED = "REJECTED"
+    SUSPENDED = "SUSPENDED"
+
+
+class UserRole(str, Enum):
+    STUDENT = "STUDENT"
+    ADMIN = "ADMIN"
+    ELECTION_MANAGER = "ELECTION_MANAGER"
+
+
+class RecordStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class CandidateStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    WITHDRAWN = "WITHDRAWN"
+    DISQUALIFIED = "DISQUALIFIED"
+
+
+class ElectionType(str, Enum):
+    UNIVERSITY = "UNIVERSITY"
+    COLLEGE = "COLLEGE"
+    ORGANIZATION = "ORGANIZATION"
+    SPECIAL = "SPECIAL"
+
+
+class ElectionStatus(str, Enum):
+    UPCOMING = "UPCOMING"
+    ACTIVE = "ACTIVE"
+    CLOSED = "CLOSED"
+    ARCHIVED = "ARCHIVED"
+
+
+class PositionScope(str, Enum):
+    UNIVERSITY = "UNIVERSITY"
+    COLLEGE = "COLLEGE"
+    ORGANIZATION = "ORGANIZATION"
+    SPECIAL = "SPECIAL"
+
+
+class ResultVisibility(str, Enum):
+    LIVE = "LIVE"
+    HIDDEN = "HIDDEN"
+    SCHEDULED = "SCHEDULED"
+    PARTIAL = "PARTIAL"
+    MANUAL = "MANUAL"
+
+
+class PartialResultType(str, Enum):
+    TURNOUT_ONLY = "TURNOUT_ONLY"
+    PERCENTAGE_ONLY = "PERCENTAGE_ONLY"
+    RANKING_ONLY = "RANKING_ONLY"
+
+
+class EligibilityType(str, Enum):
+    ALL_STUDENTS = "ALL_STUDENTS"
+    COLLEGE_ONLY = "COLLEGE_ONLY"
+    ORGANIZATION_ONLY = "ORGANIZATION_ONLY"
+    CUSTOM = "CUSTOM"
+
+
+class AuditAction(str, Enum):
+    USER_REGISTERED = "USER_REGISTERED"
+    USER_VERIFIED = "USER_VERIFIED"
+    USER_STATUS_UPDATED = "USER_STATUS_UPDATED"
+    ELECTION_CREATED = "ELECTION_CREATED"
+    ELECTION_UPDATED = "ELECTION_UPDATED"
+    CANDIDATE_CREATED = "CANDIDATE_CREATED"
+    CANDIDATE_UPDATED = "CANDIDATE_UPDATED"
+    VOTE_SUBMITTED = "VOTE_SUBMITTED"
+    RESULT_PUBLISHED = "RESULT_PUBLISHED"

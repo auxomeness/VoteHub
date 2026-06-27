@@ -1,0 +1,1 @@
+"""ADNU VoteHub backend package."""

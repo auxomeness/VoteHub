@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useInView } from "motion/react";
 import {
   LayoutDashboard, Vote, BarChart3, UserCircle, Bell, LogOut, X,
@@ -16,6 +16,46 @@ import {
 import horizontalLockupUrl from "../../images/horizontal-lockup.png";
 import whiteMainIconUrl from "../../images/white-main-icon.png";
 import whiteVerticalLockupUrl from "../../images/white-vertical-lockup.png";
+import {
+  ApiError,
+  clearToken,
+  createCandidate as apiCreateCandidate,
+  createElection as apiCreateElection,
+  createOrganization as apiCreateOrganization,
+  createPosition as apiCreatePosition,
+  createUser as apiCreateUser,
+  deleteCandidate as apiDeleteCandidate,
+  deleteOrganization as apiDeleteOrganization,
+  deletePosition as apiDeletePosition,
+  getBallot,
+  getDashboardAnalytics,
+  getElection,
+  getElectionAnalytics,
+  getMe,
+  getResults,
+  getToken,
+  listElections,
+  listOrganizations,
+  listUsers,
+  login as apiLogin,
+  registerStudent,
+  replaceElectionEligibility as apiReplaceElectionEligibility,
+  submitVote as apiSubmitVote,
+  updateCandidate as apiUpdateCandidate,
+  updateElection as apiUpdateElection,
+  updateOrganization as apiUpdateOrganization,
+  updatePosition as apiUpdatePosition,
+  updateUser as apiUpdateUser,
+  toAppUser,
+  updateUserStatus,
+  type ApiUser,
+  type BallotPosition,
+  type DashboardAnalytics,
+  type ElectionAnalytics,
+  type ElectionSummary,
+  type OrganizationRef,
+  type ResultsResponse,
+} from "./lib/api";
 
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +74,13 @@ interface AppUser {
 interface MockUser {
   id: number; studentNumber: string; name: string; email: string;
   college: string; org: string; status: string;
+}
+interface OrganizationItem {
+  id: number;
+  name: string;
+  desc: string;
+  status: "active" | "inactive";
+  members: number;
 }
 
 // ─── MOCK DATA ────────────────────────────────────────────────────────────────
@@ -324,6 +371,115 @@ const electionResultsData: Record<number, Array<{ position: string; data: Array<
     ]},
   ],
 };
+
+type ElectionItem = typeof elections[number];
+type PositionItem = typeof positions[number];
+type ElectionResultsMap = typeof electionResultsData;
+
+interface VoteHubDataContextValue {
+  elections: ElectionItem[];
+  positions: PositionItem[];
+  electionResultsData: ElectionResultsMap;
+  refreshElections: () => Promise<void>;
+  setElectionResults: (eventId: number, results: ElectionResultsMap[number]) => void;
+}
+
+const VoteHubDataContext = createContext<VoteHubDataContextValue>({
+  elections,
+  positions,
+  electionResultsData,
+  refreshElections: async () => {},
+  setElectionResults: () => {},
+});
+
+function useVoteHubData() {
+  return useContext(VoteHubDataContext);
+}
+
+function mapApiElection(election: ElectionSummary): ElectionItem {
+  const status = election.status === "archived" ? "closed" : election.status;
+  return {
+    id: election.id,
+    title: election.title,
+    description: election.description ?? "",
+    type: election.type,
+    status: status as ElectionItem["status"],
+    openDate: election.openDate,
+    closeDate: election.closeDate,
+    eligibility: election.eligibility,
+    visibility: election.visibility,
+    votescast: election.votescast,
+    totalVoters: election.totalVoters,
+  };
+}
+
+function mapApiPositions(items: BallotPosition[]): PositionItem[] {
+  return items.map((position) => ({
+    id: position.id,
+    title: position.title || position.name || "Position",
+    ...(position.college ? { college: position.college } : {}),
+    candidates: position.candidates.map((candidate) => ({
+      id: candidate.id,
+      name: candidate.name,
+      college: candidate.college,
+      org: candidate.org ?? "",
+      platform: candidate.platform ?? "",
+    })),
+  })) as PositionItem[];
+}
+
+function mapApiResults(results: ResultsResponse): ElectionResultsMap[number] {
+  return results.positions.map((position) => ({
+    position: position.position,
+    data: position.data.map((row) => ({
+      name: row.name,
+      votes: row.votes,
+      percentage: row.percentage,
+      color: row.color,
+    })),
+  }));
+}
+
+function mapApiUserRow(user: ApiUser): MockUser {
+  return {
+    id: user.id,
+    studentNumber: user.student_number,
+    name: user.full_name,
+    email: user.email,
+    college: user.college_abbreviation ?? user.college ?? "",
+    org: user.organization ?? "",
+    status: user.status === "ACTIVE" ? "active" : user.status === "SUSPENDED" ? "suspended" : "pending",
+  };
+}
+
+function mapApiOrganization(org: OrganizationRef): OrganizationItem {
+  return {
+    id: org.id,
+    name: org.name,
+    desc: org.description ?? "",
+    status: org.status === "ACTIVE" ? "active" : "inactive",
+    members: org.member_count ?? 0,
+  };
+}
+
+const RESULT_VISIBILITY_LABEL_TO_API: Record<string, string> = {
+  "Live Results": "LIVE",
+  "Hidden Results": "HIDDEN",
+  "Scheduled Release": "SCHEDULED",
+  "Partial Results": "PARTIAL",
+  "Manual Release": "MANUAL",
+};
+
+function eligibilityLabelToPayload(label: string) {
+  if (label === "All Students") return [{ eligibility_type: "ALL_STUDENTS" }];
+  if (label.endsWith(" Students")) {
+    return [{ eligibility_type: "COLLEGE_ONLY", college: label.replace(" Students", "") }];
+  }
+  if (label.endsWith(" Members")) {
+    return [{ eligibility_type: "ORGANIZATION_ONLY", organization: label.replace(" Members", "") }];
+  }
+  return [{ eligibility_type: "ALL_STUDENTS" }];
+}
 
 const turnoutData = [
   { day: "D1 9AM", votes: 234 }, { day: "D1 12PM", votes: 687 },
@@ -989,10 +1145,29 @@ function LandingPage({ onSignIn, onRegister }: { onSignIn: () => void; onRegiste
 
 // ─── LOGIN PAGE ───────────────────────────────────────────────────────────────
 
-function LoginPage({ mode = "student", onLogin, onRegister }: { mode?: "student" | "admin"; onLogin: (r: Role) => void; onRegister?: () => void }) {
+function LoginPage({ mode = "student", onLogin, onRegister }: { mode?: "student" | "admin"; onLogin: (r: Role, user: AppUser) => void; onRegister?: () => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const isAdmin = mode === "admin";
+  const handleSubmit = async () => {
+    setError("");
+    setLoading(true);
+    try {
+      const session = await apiLogin(email, password);
+      if (isAdmin && session.appUser.role !== "admin") {
+        clearToken();
+        setError("This account does not have administrator access.");
+        return;
+      }
+      onLogin(session.appUser.role, session.appUser);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to sign in. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
   return (
     <div className="min-h-screen bg-[#0A2540] flex items-center justify-center p-4 relative overflow-hidden">
       <div className="absolute inset-0 opacity-[0.06]" style={{
@@ -1009,7 +1184,10 @@ function LoginPage({ mode = "student", onLogin, onRegister }: { mode?: "student"
           <Field label="Email Address" type="email" placeholder={isAdmin ? "admin@adnu.edu.ph" : "you@gbox.adnu.edu.ph"} value={email} onChange={setEmail} required />
           <Field label="Password" type="password" placeholder="Enter your password" value={password} onChange={setPassword} required />
           <div className="flex justify-end -mt-2"><a href="#" className="text-sm text-[#2563EB] hover:underline">Forgot password?</a></div>
-          <Btn variant="primary" size="lg" onClick={() => onLogin(isAdmin ? "admin" : "student")} className="w-full">Sign In</Btn>
+          {error && <div className="rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600">{error}</div>}
+          <Btn variant="primary" size="lg" onClick={handleSubmit} className="w-full" disabled={loading || !email || !password}>
+            {loading ? "Signing in..." : "Sign In"}
+          </Btn>
         </div>
         {!isAdmin && onRegister && (
           <p className="text-center text-sm text-slate-300 mt-6">
@@ -1026,8 +1204,34 @@ function LoginPage({ mode = "student", onLogin, onRegister }: { mode?: "student"
 
 function RegisterPage({ onBack, onRegister }: { onBack: () => void; onRegister: () => void }) {
   const [form, setForm] = useState({ name: "", studentNumber: "", email: "", college: "", program: "", organization: "", password: "", confirmPassword: "" });
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const set = (k: keyof typeof form) => (v: string) => setForm((f) => ({ ...f, [k]: v }));
   const validEmail = form.email.endsWith("@gbox.adnu.edu.ph");
+  const handleRegister = async () => {
+    setError("");
+    if (form.password !== form.confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setLoading(true);
+    try {
+      await registerStudent({
+        full_name: form.name,
+        student_number: form.studentNumber,
+        email: form.email,
+        password: form.password,
+        college: form.college,
+        organization: form.organization || undefined,
+        program: form.program,
+      });
+      onRegister();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to create account. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
   return (
     <div className="min-h-screen bg-[#0A2540] flex items-center justify-center p-4 py-12 relative overflow-hidden">
       <div className="absolute inset-0 opacity-[0.06]" style={{
@@ -1059,7 +1263,10 @@ function RegisterPage({ onBack, onRegister }: { onBack: () => void; onRegister: 
             <Field label="Password" type="password" placeholder="••••••••" value={form.password} onChange={set("password")} required />
             <Field label="Confirm Password" type="password" placeholder="••••••••" value={form.confirmPassword} onChange={set("confirmPassword")} required />
           </div>
-          <Btn variant="primary" size="lg" onClick={onRegister} className="w-full" disabled={!validEmail}>Create Account</Btn>
+          {error && <div className="rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600">{error}</div>}
+          <Btn variant="primary" size="lg" onClick={handleRegister} className="w-full" disabled={!validEmail || loading}>
+            {loading ? "Creating..." : "Create Account"}
+          </Btn>
         </div>
         <p className="text-center text-sm text-slate-300 mt-6">
           Already have an account?{" "}
@@ -1073,7 +1280,7 @@ function RegisterPage({ onBack, onRegister }: { onBack: () => void; onRegister: 
 // ─── SHARED ELECTION CARD ─────────────────────────────────────────────────────
 
 function ElectionCard({ election, onVote, onResults }: {
-  election: typeof elections[0]; onVote?: () => void; onResults?: () => void;
+  election: ElectionItem; onVote?: (eventId: number) => void; onResults?: (eventId: number) => void;
 }) {
   const turnout = election.totalVoters > 0 ? Math.round((election.votescast / election.totalVoters) * 100) : 0;
   const isActive = election.status === "active";
@@ -1127,12 +1334,12 @@ function ElectionCard({ election, onVote, onResults }: {
 
         <div className="flex gap-2 pt-1">
           {isActive && onVote && (
-            <Btn variant="primary" size="sm" onClick={onVote} className="flex-1 !rounded-xl">
+            <Btn variant="primary" size="sm" onClick={() => onVote(election.id)} className="flex-1 !rounded-xl">
               <Vote className="w-3.5 h-3.5" /> Vote Now
             </Btn>
           )}
           {election.status !== "upcoming" && onResults && (
-            <Btn variant="ghost" size="sm" onClick={onResults} className={`${isActive && onVote ? "" : "flex-1"} text-slate-600 border border-slate-200 !rounded-xl hover:border-[#0A2540] hover:text-[#0A2540]`}>
+            <Btn variant="ghost" size="sm" onClick={() => onResults(election.id)} className={`${isActive && onVote ? "" : "flex-1"} text-slate-600 border border-slate-200 !rounded-xl hover:border-[#0A2540] hover:text-[#0A2540]`}>
               <BarChart3 className="w-3.5 h-3.5" /> Results
             </Btn>
           )}
@@ -1150,8 +1357,9 @@ function ElectionCard({ election, onVote, onResults }: {
 // ─── STUDENT DASHBOARD ────────────────────────────────────────────────────────
 
 function StudentDashboard({ user, onVote, onResults }: {
-  user: AppUser; onVote: () => void; onResults: () => void;
+  user: AppUser; onVote: (eventId: number) => void; onResults: (eventId: number) => void;
 }) {
+  const { elections } = useVoteHubData();
   const active = elections.filter((e) => e.status === "active");
   const upcoming = elections.filter((e) => e.status === "upcoming");
   const closed = elections.filter((e) => e.status === "closed");
@@ -1203,7 +1411,8 @@ function StudentDashboard({ user, onVote, onResults }: {
   );
 }
 
-function ElectionsList({ onVote, onResults }: { onVote: () => void; onResults: () => void }) {
+function ElectionsList({ onVote, onResults }: { onVote: (eventId: number) => void; onResults: (eventId: number) => void }) {
+  const { elections } = useVoteHubData();
   const [filter, setFilter] = useState<"all" | "active" | "upcoming" | "closed">("all");
   const filtered = filter === "all" ? elections : elections.filter((e) => e.status === filter);
   return (
@@ -1228,16 +1437,70 @@ function ElectionsList({ onVote, onResults }: { onVote: () => void; onResults: (
 
 const ABSTAIN_ID = 0;
 
-function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
+function VotingPage({ user, eventId, onBack }: { user: AppUser; eventId: number; onBack: () => void }) {
+  const { elections, refreshElections, setElectionResults } = useVoteHubData();
   const [phase, setPhase] = useState<"consent" | "ballot" | "submitted">("consent");
   const [hasAcknowledgedPolicies, setHasAcknowledgedPolicies] = useState(false);
   const [selections, setSelections] = useState<Record<number, number>>({});
   const [showConfirm, setShowConfirm] = useState(false);
+  const [ballotPositions, setBallotPositions] = useState<PositionItem[]>(positions);
+  const [selectedElection, setSelectedElection] = useState<ElectionItem | null>(() => elections.find((e) => e.id === eventId) ?? null);
+  const [ballotError, setBallotError] = useState("");
+  const [submitError, setSubmitError] = useState("");
+  const [receipt, setReceipt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const filteredPositions = positions.filter((p) => !("college" in p) || (p as any).college === user.college);
+  const election = selectedElection ?? elections.find((e) => e.id === eventId) ?? elections[0];
+  const filteredPositions = ballotPositions.filter((p) => !("college" in p) || (p as any).college === user.college);
   const total = filteredPositions.length;
   const selected = Object.keys(selections).length;
   const allConsented = hasAcknowledgedPolicies;
+
+  useEffect(() => {
+    let mounted = true;
+    setBallotError("");
+    setSelections({});
+    getBallot(eventId)
+      .then((ballot) => {
+        if (!mounted) return;
+        setSelectedElection(mapApiElection(ballot));
+        setBallotPositions(mapApiPositions(ballot.positions));
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setBallotError(err instanceof ApiError ? err.message : "Unable to load ballot from the backend.");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [eventId]);
+
+  const handleSubmitVote = async () => {
+    setSubmitError("");
+    setSubmitting(true);
+    try {
+      const payload = Object.entries(selections).map(([positionId, candidateId]) => ({
+        position_id: Number(positionId),
+        candidate_id: candidateId === ABSTAIN_ID ? null : candidateId,
+        is_abstain: candidateId === ABSTAIN_ID,
+      }));
+      const response = await apiSubmitVote(eventId, payload);
+      setReceipt(response.receipt_code);
+      setShowConfirm(false);
+      setPhase("submitted");
+      await refreshElections();
+      try {
+        const results = await getResults(eventId);
+        if (results.visible) setElectionResults(eventId, mapApiResults(results));
+      } catch {
+        // Results visibility can legitimately block this request after voting.
+      }
+    } catch (err) {
+      setSubmitError(err instanceof ApiError ? err.message : "Unable to submit vote. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const toggleSelection = (positionId: number, candidateId: number) => {
     setSelections((s) => {
@@ -1259,7 +1522,7 @@ function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
         </div>
         <h2 className="text-2xl font-bold text-[#0F172A] mb-2" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Vote Submitted!</h2>
         <p className="text-slate-500 mb-2">Your ballot has been securely recorded and sealed.</p>
-        <p className="text-xs text-slate-400 font-mono mb-8">Receipt: VH-2025-{Math.random().toString(36).slice(2, 9).toUpperCase()}</p>
+        <p className="text-xs text-slate-400 font-mono mb-8">Receipt: {receipt || "Pending"}</p>
         <Btn variant="primary" onClick={onBack}>Return to Dashboard</Btn>
       </div>
     );
@@ -1272,10 +1535,11 @@ function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
         <div className="bg-[#0A2540] rounded-2xl p-6 mb-6 text-white">
           <StatusBadge status="active" />
           <h1 className="text-lg font-bold mt-2 mb-1" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-            Ateneo Student Government Elections 2025
+            {election.title}
           </h1>
           <p className="text-slate-300 text-sm">Before you vote, please review and accept the election policies.</p>
         </div>
+        {ballotError && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs font-medium text-red-600 mb-6">{ballotError}</div>}
 
         {/* Policies */}
         <div className="space-y-4 mb-6">
@@ -1332,9 +1596,9 @@ function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
           <div className="flex-1 min-w-0">
             <StatusBadge status="active" />
             <h1 className="text-lg font-bold mt-2 mb-1" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              Ateneo Student Government Elections 2025
+              {election.title}
             </h1>
-            <p className="text-slate-300 text-sm">Jun 25 – Jun 27, 2025 · University-Wide</p>
+            <p className="text-slate-300 text-sm">{election.openDate} - {election.closeDate} · {election.type}</p>
           </div>
           <div className="text-right shrink-0">
             <div className="text-2xl font-bold font-mono">{selected}/{total}</div>
@@ -1410,10 +1674,11 @@ function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
               {total - selected > 0 && <span className="text-amber-600"> {total - selected} position(s) will be left blank.</span>}
             </p>
             <p className="text-xs text-slate-400 mb-6">Votes <strong className="text-slate-600">cannot be modified</strong> after submission. Abstain selections are recorded as valid votes.</p>
+            {submitError && <div className="rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600 mb-4">{submitError}</div>}
             <div className="flex gap-3">
               <Btn variant="ghost" onClick={() => setShowConfirm(false)} className="flex-1">Cancel</Btn>
-              <Btn variant="primary" onClick={() => { setShowConfirm(false); setPhase("submitted"); }} className="flex-1">
-                Confirm Vote
+              <Btn variant="primary" onClick={handleSubmitVote} className="flex-1" disabled={submitting}>
+                {submitting ? "Submitting..." : "Confirm Vote"}
               </Btn>
             </div>
           </div>
@@ -1425,13 +1690,33 @@ function VotingPage({ user, onBack }: { user: AppUser; onBack: () => void }) {
 
 // ─── RESULTS PAGE ─────────────────────────────────────────────────────────────
 
-function ResultsPage() {
-  const selectedElectionId = elections[0].id;
+function ResultsPage({ selectedElectionId }: { selectedElectionId: number }) {
+  const { elections, electionResultsData, setElectionResults } = useVoteHubData();
   const [activePos, setActivePos] = useState(0);
+  const [resultsError, setResultsError] = useState("");
 
   const sel = elections.find((e) => e.id === selectedElectionId) ?? elections[0];
   const positionResults = electionResultsData[selectedElectionId] ?? [];
   const current = positionResults[activePos];
+
+  useEffect(() => {
+    let mounted = true;
+    setResultsError("");
+    setActivePos(0);
+    getResults(selectedElectionId)
+      .then((results) => {
+        if (!mounted) return;
+        if (results.visible) setElectionResults(selectedElectionId, mapApiResults(results));
+        else setElectionResults(selectedElectionId, []);
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        setResultsError(err instanceof ApiError ? err.message : "Unable to load results.");
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [selectedElectionId, setElectionResults]);
 
   return (
     <div className="p-4 lg:p-8 max-w-5xl mx-auto">
@@ -1441,6 +1726,7 @@ function ResultsPage() {
           {sel.status === "active" && <StatusBadge status="live" />}
         </div>
       </div>
+      {resultsError && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs font-medium text-red-600 mb-6">{resultsError}</div>}
 
       {/* Election summary banner */}
       <div className="bg-[#0A2540] text-white rounded-2xl p-4 lg:p-5 mb-6 flex flex-wrap gap-4 lg:gap-6 items-center">
@@ -1792,6 +2078,22 @@ function NotificationsPage() {
 // ─── ADMIN DASHBOARD ──────────────────────────────────────────────────────────
 
 function AdminDashboard({ onCreateElection, onAnalytics }: { onCreateElection: () => void; onAnalytics: () => void }) {
+  const { elections } = useVoteHubData();
+  const [overview, setOverview] = useState<DashboardAnalytics | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    getDashboardAnalytics()
+      .then((data) => {
+        if (mounted) setOverview(data);
+      })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
+  const totalStudents = overview?.total_students ?? 4200;
+  const activeStudents = overview?.active_students ?? totalStudents;
+  const totalElections = overview?.total_elections ?? elections.length;
+  const activeCount = overview?.active_elections ?? elections.filter((e) => e.status === "active").length;
+  const totalVotes = overview?.votes_cast ?? elections.reduce((sum, election) => sum + election.votescast, 0);
   return (
     <div className="p-6 lg:p-8">
       <div className="flex items-center justify-between mb-8">
@@ -1805,10 +2107,10 @@ function AdminDashboard({ onCreateElection, onAnalytics }: { onCreateElection: (
         </div>
       </div>
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
-        <MetricCard label="Total Students" value="4,200" icon={Users2} sub="+84 this week" />
-        <MetricCard label="Total Elections" value="12" icon={Vote} sub="AY 2025–2026" />
-        <MetricCard label="Active Elections" value="4" icon={TrendingUp} accent sub="2 ending today" />
-        <MetricCard label="Votes Cast" value="12,847" icon={CheckCircle2} sub="All elections" />
+        <MetricCard label="Total Students" value={totalStudents.toLocaleString()} icon={Users2} sub={`${activeStudents.toLocaleString()} active`} />
+        <MetricCard label="Total Elections" value={String(totalElections)} icon={Vote} sub="AY 2025–2026" />
+        <MetricCard label="Active Elections" value={String(activeCount)} icon={TrendingUp} accent sub="Live now" />
+        <MetricCard label="Votes Cast" value={totalVotes.toLocaleString()} icon={CheckCircle2} sub="All elections" />
       </div>
       <div className="grid lg:grid-cols-2 gap-6 mb-6">
         <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
@@ -1881,13 +2183,74 @@ function AdminDashboard({ onCreateElection, onAnalytics }: { onCreateElection: (
 function AdminUsers() {
   const [users, setUsers] = useState<MockUser[]>(mockUsersData);
   const [search, setSearch] = useState("");
+  const [error, setError] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editUser, setEditUser] = useState<MockUser | null>(null);
   const [viewUser, setViewUser] = useState<MockUser | null>(null);
   const [addForm, setAddForm] = useState({ name: "", studentNumber: "", email: "", college: "", org: "" });
   const setA = (k: keyof typeof addForm) => (v: string) => setAddForm((f) => ({ ...f, [k]: v }));
   const filtered = users.filter((u) => u.name.toLowerCase().includes(search.toLowerCase()) || u.studentNumber.includes(search) || u.email.toLowerCase().includes(search.toLowerCase()));
-  const toggleStatus = (id: number, action: "activate" | "suspend") => setUsers((us) => us.map((u) => u.id === id ? { ...u, status: action === "activate" ? "active" : "suspended" } : u));
+  const toggleStatus = async (id: number, action: "activate" | "suspend") => {
+    const nextStatus = action === "activate" ? "ACTIVE" : "SUSPENDED";
+    const previous = users;
+    setUsers((us) => us.map((u) => u.id === id ? { ...u, status: action === "activate" ? "active" : "suspended" } : u));
+    try {
+      const updated = await updateUserStatus(id, nextStatus);
+      setUsers((us) => us.map((u) => u.id === id ? mapApiUserRow(updated) : u));
+    } catch (err) {
+      setUsers(previous);
+      setError(err instanceof ApiError ? err.message : "Unable to update user status.");
+    }
+  };
+
+  const handleAddUser = async () => {
+    if (!addForm.name || !addForm.studentNumber || !addForm.email || !addForm.college) return;
+    try {
+      const created = await apiCreateUser({
+        full_name: addForm.name,
+        student_number: addForm.studentNumber,
+        email: addForm.email,
+        college: addForm.college,
+        organization: addForm.org || undefined,
+        status: "ACTIVE",
+      });
+      setUsers((us) => [mapApiUserRow(created), ...us]);
+      setShowAdd(false);
+      setAddForm({ name: "", studentNumber: "", email: "", college: "", org: "" });
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to add user.");
+    }
+  };
+
+  const handleSaveUser = async () => {
+    if (!editUser || !editUser.name || !editUser.studentNumber || !editUser.email || !editUser.college) return;
+    try {
+      const updated = await apiUpdateUser(editUser.id, {
+        full_name: editUser.name,
+        student_number: editUser.studentNumber,
+        email: editUser.email,
+        college: editUser.college,
+        organization: editUser.org,
+      });
+      setUsers((us) => us.map((u) => u.id === editUser.id ? mapApiUserRow(updated) : u));
+      setEditUser(null);
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to save user changes.");
+    }
+  };
+
+  useEffect(() => {
+    listUsers()
+      .then((apiUsers) => {
+        setUsers(apiUsers.map(mapApiUserRow));
+        setError("");
+      })
+      .catch((err) => {
+        setError(err instanceof ApiError ? err.message : "Unable to load users from the backend.");
+      });
+  }, []);
 
   return (
     <div className="p-6 lg:p-8">
@@ -1904,6 +2267,7 @@ function AdminUsers() {
           <Btn variant="primary" size="sm" onClick={() => setShowAdd(true)}><Plus className="w-4 h-4" /> Add User</Btn>
         </div>
       </div>
+      {error && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs font-medium text-red-600 mb-4">{error}</div>}
       {/* Desktop table */}
       <div className="hidden lg:block bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -1993,7 +2357,7 @@ function AdminUsers() {
             </div>
             <div className="flex gap-3 pt-2">
               <Btn variant="ghost" onClick={() => setShowAdd(false)} className="flex-1">Cancel</Btn>
-              <Btn variant="primary" onClick={() => { if (addForm.name && addForm.studentNumber && addForm.email && addForm.college) { setUsers((us) => [...us, { id: Date.now(), ...addForm, status: "pending" }]); setShowAdd(false); setAddForm({ name: "", studentNumber: "", email: "", college: "", org: "" }); } }} className="flex-1">Add User</Btn>
+              <Btn variant="primary" onClick={handleAddUser} className="flex-1">Add User</Btn>
             </div>
           </div>
         </Modal>
@@ -2010,7 +2374,7 @@ function AdminUsers() {
             </div>
             <div className="flex gap-3 pt-2">
               <Btn variant="ghost" onClick={() => setEditUser(null)} className="flex-1">Cancel</Btn>
-              <Btn variant="primary" onClick={() => { setUsers((us) => us.map((u) => u.id === editUser!.id ? editUser! : u)); setEditUser(null); }} className="flex-1">Save Changes</Btn>
+              <Btn variant="primary" onClick={handleSaveUser} className="flex-1">Save Changes</Btn>
             </div>
           </div>
         </Modal>
@@ -2053,12 +2417,26 @@ function AdminUsers() {
 // ─── ADMIN ELECTIONS ──────────────────────────────────────────────────────────
 
 function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: () => void; onAnalytics: () => void }) {
+  const { elections, positions, electionResultsData, refreshElections, setElectionResults } = useVoteHubData();
   const [selectedId, setSelectedId] = useState<number>(elections[0].id);
   const [activeTab, setActiveTab] = useState("overview");
   const [mobileShowDetail, setMobileShowDetail] = useState(false);
+  const [error, setError] = useState("");
   const selected = elections.find((e) => e.id === selectedId) ?? elections[0];
   const turnout = Math.round((selected.votescast / selected.totalVoters) * 100);
+  const selectedResults = electionResultsData[selected.id] ?? [];
   const tabs = ["Overview", "Candidates", "Positions", "Analytics", "Results", "Settings"];
+  const [settingsForm, setSettingsForm] = useState({ visibility: selected.visibility, eligibility: selected.eligibility });
+
+  useEffect(() => {
+    if (elections.length > 0 && !elections.some((election) => election.id === selectedId)) {
+      setSelectedId(elections[0].id);
+    }
+  }, [elections, selectedId]);
+
+  useEffect(() => {
+    setSettingsForm({ visibility: selected.visibility, eligibility: selected.eligibility });
+  }, [selected.id, selected.visibility, selected.eligibility]);
 
   // Candidate modal state
   type CandidateForm = { id?: number; name: string; college: string; org: string; platform: string; positionId: number };
@@ -2072,6 +2450,140 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
   const [showAddPosition, setShowAddPosition] = useState(false);
   const [editPosition, setEditPosition] = useState<PositionForm | null>(null);
   const [positionForm, setPositionForm] = useState<PositionForm>({ title: "", college: "" });
+
+  const reloadSelectedElection = useCallback(async () => {
+    try {
+      const detail = await getElection(selectedId);
+      setManagedPositions(mapApiPositions(detail.positions).map(p => ({ ...p, candidates: [...p.candidates] })));
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to load election details.");
+    }
+  }, [selectedId]);
+
+  useEffect(() => {
+    reloadSelectedElection();
+  }, [reloadSelectedElection]);
+
+  useEffect(() => {
+    if (activeTab !== "results") return;
+    getResults(selectedId)
+      .then((results) => {
+        setElectionResults(selectedId, results.visible ? mapApiResults(results) : []);
+      })
+      .catch((err) => {
+        setError(err instanceof ApiError ? err.message : "Unable to load election results.");
+      });
+  }, [activeTab, selectedId, setElectionResults]);
+
+  const handleAddCandidate = async () => {
+    if (!candidateForm.name || !candidateForm.college) return;
+    try {
+      await apiCreateCandidate({
+        position_id: candidateForm.positionId,
+        name: candidateForm.name,
+        college: candidateForm.college,
+        organization: candidateForm.org || undefined,
+        platform: candidateForm.platform,
+      });
+      setShowAddCandidate(false);
+      await reloadSelectedElection();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to add candidate.");
+    }
+  };
+
+  const handleSaveCandidate = async () => {
+    if (!editCandidate?.id) return;
+    try {
+      await apiUpdateCandidate(editCandidate.id, {
+        name: candidateForm.name,
+        college: candidateForm.college,
+        organization: candidateForm.org || undefined,
+        platform: candidateForm.platform,
+      });
+      setEditCandidate(null);
+      await reloadSelectedElection();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to update candidate.");
+    }
+  };
+
+  const handleDeleteCandidate = async (candidateId: number) => {
+    try {
+      await apiDeleteCandidate(candidateId);
+      await reloadSelectedElection();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to delete candidate.");
+    }
+  };
+
+  const handleAddPosition = async () => {
+    if (!positionForm.title) return;
+    try {
+      await apiCreatePosition(selected.id, {
+        name: positionForm.title,
+        position_scope: positionForm.college ? "COLLEGE" : "UNIVERSITY",
+        college: positionForm.college || undefined,
+        max_selection: 1,
+        display_order: managedPositions.length + 1,
+      });
+      setShowAddPosition(false);
+      await reloadSelectedElection();
+      await refreshElections();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to add position.");
+    }
+  };
+
+  const handleSavePosition = async () => {
+    if (!editPosition?.id) return;
+    try {
+      await apiUpdatePosition(selected.id, editPosition.id, {
+        name: positionForm.title,
+        position_scope: positionForm.college ? "COLLEGE" : "UNIVERSITY",
+        college: positionForm.college || undefined,
+      });
+      setEditPosition(null);
+      await reloadSelectedElection();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to update position.");
+    }
+  };
+
+  const handleDeletePosition = async (positionId: number) => {
+    try {
+      await apiDeletePosition(selected.id, positionId);
+      await reloadSelectedElection();
+      await refreshElections();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to delete position.");
+    }
+  };
+
+  const handleArchiveElection = async () => {
+    try {
+      await apiUpdateElection(selected.id, { status: "ARCHIVED" });
+      await refreshElections();
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to archive election.");
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    try {
+      await apiUpdateElection(selected.id, {
+        result_visibility: RESULT_VISIBILITY_LABEL_TO_API[settingsForm.visibility] ?? "HIDDEN",
+      });
+      await apiReplaceElectionEligibility(selected.id, eligibilityLabelToPayload(settingsForm.eligibility));
+      await reloadSelectedElection();
+      await refreshElections();
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to save election settings.");
+    }
+  };
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -2109,8 +2621,8 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
               <StatusBadge status={selected.status} /><TypeBadge type={selected.type} />
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <Btn size="sm" variant="ghost" className="text-slate-600 text-xs"><Edit2 className="w-3.5 h-3.5" /> Edit</Btn>
-              <Btn size="sm" variant="ghost" className="text-[#DC2626] hover:bg-red-50 text-xs"><Archive className="w-3.5 h-3.5" /> Archive</Btn>
+              <Btn size="sm" variant="ghost" onClick={() => setActiveTab("settings")} className="text-slate-600 text-xs"><Edit2 className="w-3.5 h-3.5" /> Edit</Btn>
+              <Btn size="sm" variant="ghost" onClick={handleArchiveElection} className="text-[#DC2626] hover:bg-red-50 text-xs"><Archive className="w-3.5 h-3.5" /> Archive</Btn>
             </div>
           </div>
           <div className="flex gap-1 overflow-x-auto">
@@ -2121,6 +2633,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
               </button>
             ))}
           </div>
+          {error && <div className="mt-3 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600">{error}</div>}
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
@@ -2174,7 +2687,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                         </div>
                         <button onClick={() => { setEditCandidate({ id: c.id, name: c.name, college: c.college, org: c.org ?? "", platform: c.platform, positionId: pos.id }); setCandidateForm({ id: c.id, name: c.name, college: c.college, org: c.org ?? "", platform: c.platform, positionId: pos.id }); }}
                           className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 cursor-pointer transition-colors"><Edit2 className="w-3.5 h-3.5" /></button>
-                        <button onClick={() => setManagedPositions(ps => ps.map(p => p.id === pos.id ? { ...p, candidates: p.candidates.filter(x => x.id !== c.id) } : p))}
+                        <button onClick={() => handleDeleteCandidate(c.id)}
                           className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-[#DC2626] cursor-pointer transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                       </div>
                     ))}
@@ -2215,12 +2728,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                     </div>
                     <div className="flex gap-3 pt-2">
                       <Btn variant="ghost" onClick={() => setShowAddCandidate(false)} className="flex-1">Cancel</Btn>
-                      <Btn variant="primary" onClick={() => {
-                        if (candidateForm.name && candidateForm.college) {
-                          setManagedPositions(ps => ps.map(p => p.id === candidateForm.positionId ? { ...p, candidates: [...p.candidates, { id: Date.now(), name: candidateForm.name, college: candidateForm.college, org: candidateForm.org, platform: candidateForm.platform }] } : p));
-                          setShowAddCandidate(false);
-                        }
-                      }} className="flex-1">Add Candidate</Btn>
+                      <Btn variant="primary" onClick={handleAddCandidate} className="flex-1">Add Candidate</Btn>
                     </div>
                   </div>
                 </Modal>
@@ -2245,13 +2753,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                     </div>
                     <div className="flex gap-3 pt-2">
                       <Btn variant="ghost" onClick={() => setEditCandidate(null)} className="flex-1">Cancel</Btn>
-                      <Btn variant="primary" onClick={() => {
-                        setManagedPositions(ps => ps.map(p => ({
-                          ...p,
-                          candidates: p.candidates.map(c => c.id === editCandidate.id ? { ...c, name: candidateForm.name, college: candidateForm.college, org: candidateForm.org, platform: candidateForm.platform } : c)
-                        })));
-                        setEditCandidate(null);
-                      }} className="flex-1">Save Changes</Btn>
+                      <Btn variant="primary" onClick={handleSaveCandidate} className="flex-1">Save Changes</Btn>
                     </div>
                   </div>
                 </Modal>
@@ -2277,7 +2779,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                     <div className="flex gap-1">
                       <button onClick={() => { setEditPosition({ id: p.id, title: p.title, college: (p as any).college ?? "" }); setPositionForm({ id: p.id, title: p.title, college: (p as any).college ?? "" }); }}
                         className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 cursor-pointer transition-colors"><Edit2 className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => setManagedPositions(ps => ps.filter(x => x.id !== p.id))}
+                      <button onClick={() => handleDeletePosition(p.id)}
                         className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-[#DC2626] cursor-pointer transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   </div>
@@ -2292,12 +2794,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                     <DropField label="College Restriction (optional)" value={positionForm.college} onChange={v => setPositionForm(f => ({ ...f, college: v }))} options={COLLEGES} placeholder="All colleges (no restriction)" />
                     <div className="flex gap-3 pt-2">
                       <Btn variant="ghost" onClick={() => setShowAddPosition(false)} className="flex-1">Cancel</Btn>
-                      <Btn variant="primary" onClick={() => {
-                        if (positionForm.title) {
-                          setManagedPositions(ps => [...ps, { id: Date.now(), title: positionForm.title, ...(positionForm.college ? { college: positionForm.college } : {}), candidates: [] }]);
-                          setShowAddPosition(false);
-                        }
-                      }} className="flex-1">Add Position</Btn>
+                      <Btn variant="primary" onClick={handleAddPosition} className="flex-1">Add Position</Btn>
                     </div>
                   </div>
                 </Modal>
@@ -2311,10 +2808,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
                     <DropField label="College Restriction (optional)" value={positionForm.college} onChange={v => setPositionForm(f => ({ ...f, college: v }))} options={COLLEGES} placeholder="All colleges (no restriction)" />
                     <div className="flex gap-3 pt-2">
                       <Btn variant="ghost" onClick={() => setEditPosition(null)} className="flex-1">Cancel</Btn>
-                      <Btn variant="primary" onClick={() => {
-                        setManagedPositions(ps => ps.map(p => p.id === editPosition.id ? { ...p, title: positionForm.title } : p));
-                        setEditPosition(null);
-                      }} className="flex-1">Save Changes</Btn>
+                      <Btn variant="primary" onClick={handleSavePosition} className="flex-1">Save Changes</Btn>
                     </div>
                   </div>
                 </Modal>
@@ -2323,7 +2817,7 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
           )}
           {activeTab === "results" && (
             <div className="w-full">
-              {[{ position: "President", data: presidentResults }, { position: "Vice President", data: vpResults }, { position: "Secretary", data: secretaryResults }].map((r) => (
+              {selectedResults.map((r) => (
                 <div key={r.position} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 mb-4">
                   <div className="flex items-center justify-between mb-4">
                     <h3 className="font-semibold text-[#0F172A] text-sm">{r.position}</h3>
@@ -2356,9 +2850,9 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
             <div className="w-full">
               <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 flex flex-col gap-4">
                 <h3 className="font-semibold text-[#0F172A] text-sm">Election Settings</h3>
-                <DropField label="Result Visibility" value={selected.visibility} onChange={() => {}} options={["Live Results", "Hidden Results", "Scheduled Release", "Partial Results", "Manual Release"]} />
-                <DropField label="Eligibility" value={selected.eligibility} onChange={() => {}} options={["All Students", "CCS Students", "CBA Students", "CED Students", "CHSS Students", "CON Students", "COL Students", "JPCS Members"]} />
-                <div className="pt-2"><Btn variant="primary" size="sm">Save Settings</Btn></div>
+                <DropField label="Result Visibility" value={settingsForm.visibility} onChange={(visibility) => setSettingsForm((form) => ({ ...form, visibility }))} options={["Live Results", "Hidden Results", "Scheduled Release", "Partial Results", "Manual Release"]} />
+                <DropField label="Eligibility" value={settingsForm.eligibility} onChange={(eligibility) => setSettingsForm((form) => ({ ...form, eligibility }))} options={["All Students", "CCS Students", "CBA Students", "CED Students", "CHSS Students", "CON Students", "COL Students", "JPCS Members"]} />
+                <div className="pt-2"><Btn variant="primary" size="sm" onClick={handleSaveSettings}>Save Settings</Btn></div>
               </div>
             </div>
           )}
@@ -2371,17 +2865,90 @@ function AdminElections({ onCreateElection, onAnalytics }: { onCreateElection: (
 // ─── ADMIN ORGANIZATIONS ──────────────────────────────────────────────────────
 
 function AdminOrganizations() {
-  const initialOrgs = ORGS.map((name, i) => ({
+  const initialOrgs: OrganizationItem[] = ORGS.map((name, i) => ({
     id: i + 1, name,
     desc: ["Computer Science Society", "Junior Philippine Computer Society", "Photography & Film Arts", "The Pillars Publication", "Debate Society", "Leadership & Empowerment", "Guidance & Advocacy", "Tactical Studies"][i],
-    status: i === 7 ? "inactive" : "active",
+    status: (i === 7 ? "inactive" : "active") as OrganizationItem["status"],
     members: [145, 312, 87, 64, 43, 98, 76, 54][i],
   }));
-  const [orgs, setOrgs] = useState(initialOrgs);
-  const [editOrg, setEditOrg] = useState<typeof initialOrgs[0] | null>(null);
-  const [deleteOrg, setDeleteOrg] = useState<typeof initialOrgs[0] | null>(null);
+  const [orgs, setOrgs] = useState<OrganizationItem[]>(initialOrgs);
+  const [editOrg, setEditOrg] = useState<OrganizationItem | null>(null);
+  const [deleteOrg, setDeleteOrg] = useState<OrganizationItem | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [newOrg, setNewOrg] = useState({ name: "", desc: "" });
+  const [error, setError] = useState("");
+
+  const reloadOrganizations = useCallback(async () => {
+    try {
+      const items = await listOrganizations();
+      setOrgs(items.map(mapApiOrganization));
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to load organizations.");
+    }
+  }, []);
+
+  useEffect(() => {
+    reloadOrganizations();
+  }, [reloadOrganizations]);
+
+  const handleCreateOrg = async () => {
+    if (!newOrg.name.trim()) return;
+    try {
+      const created = await apiCreateOrganization({
+        name: newOrg.name.trim(),
+        description: newOrg.desc.trim() || undefined,
+        status: "ACTIVE",
+      });
+      setOrgs((items) => [...items, mapApiOrganization(created)]);
+      setShowAdd(false);
+      setNewOrg({ name: "", desc: "" });
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to create organization.");
+    }
+  };
+
+  const handleSaveOrg = async () => {
+    if (!editOrg || !editOrg.name.trim()) return;
+    try {
+      const updated = await apiUpdateOrganization(editOrg.id, {
+        name: editOrg.name.trim(),
+        description: editOrg.desc.trim(),
+      });
+      setOrgs((items) => items.map((org) => org.id === editOrg.id ? mapApiOrganization(updated) : org));
+      setEditOrg(null);
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to save organization.");
+    }
+  };
+
+  const handleToggleOrg = async (org: OrganizationItem) => {
+    const previous = orgs;
+    const nextStatus = org.status === "active" ? "INACTIVE" : "ACTIVE";
+    setOrgs((items) => items.map((item) => item.id === org.id ? { ...item, status: item.status === "active" ? "inactive" : "active" } : item));
+    try {
+      const updated = await apiUpdateOrganization(org.id, { status: nextStatus });
+      setOrgs((items) => items.map((item) => item.id === org.id ? mapApiOrganization(updated) : item));
+      setError("");
+    } catch (err) {
+      setOrgs(previous);
+      setError(err instanceof ApiError ? err.message : "Unable to update organization status.");
+    }
+  };
+
+  const handleDeleteOrg = async () => {
+    if (!deleteOrg) return;
+    try {
+      await apiDeleteOrganization(deleteOrg.id);
+      setOrgs((items) => items.filter((org) => org.id !== deleteOrg.id));
+      setDeleteOrg(null);
+      setError("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to delete organization.");
+    }
+  };
 
   return (
     <div className="p-6 lg:p-8">
@@ -2389,6 +2956,7 @@ function AdminOrganizations() {
         <h1 className="text-2xl font-bold text-[#0F172A]" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Organizations</h1>
         <Btn variant="primary" size="sm" onClick={() => setShowAdd(true)}><Plus className="w-4 h-4" /> Add</Btn>
       </div>
+      {error && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs font-medium text-red-600 mb-4">{error}</div>}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {orgs.map((org) => (
           <div key={org.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5 hover:shadow-md transition-all">
@@ -2402,7 +2970,7 @@ function AdminOrganizations() {
               <span className="text-xs text-slate-400 font-mono">{org.members} members</span>
               <div className="flex gap-1">
                 <button onClick={() => setEditOrg({ ...org })} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"><Edit2 className="w-3.5 h-3.5" /></button>
-                <button onClick={() => setOrgs((os) => os.map((o) => o.id === org.id ? { ...o, status: o.status === "active" ? "inactive" : "active" } : o))} className="p-1.5 rounded-lg hover:bg-amber-50 text-slate-400 hover:text-amber-600 transition-colors cursor-pointer"><Archive className="w-3.5 h-3.5" /></button>
+                <button onClick={() => handleToggleOrg(org)} className="p-1.5 rounded-lg hover:bg-amber-50 text-slate-400 hover:text-amber-600 transition-colors cursor-pointer"><Archive className="w-3.5 h-3.5" /></button>
                 <button onClick={() => setDeleteOrg(org)} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-[#DC2626] transition-colors cursor-pointer"><Trash2 className="w-3.5 h-3.5" /></button>
               </div>
             </div>
@@ -2416,7 +2984,7 @@ function AdminOrganizations() {
             <Field label="Description" placeholder="Brief description..." value={newOrg.desc} onChange={(v) => setNewOrg((f) => ({ ...f, desc: v }))} as="textarea" />
             <div className="flex gap-3 pt-2">
               <Btn variant="ghost" onClick={() => setShowAdd(false)} className="flex-1">Cancel</Btn>
-              <Btn variant="primary" onClick={() => { if (newOrg.name) { setOrgs((os) => [...os, { id: Date.now(), name: newOrg.name, desc: newOrg.desc, status: "active", members: 0 }]); setShowAdd(false); setNewOrg({ name: "", desc: "" }); } }} className="flex-1">Create</Btn>
+              <Btn variant="primary" onClick={handleCreateOrg} className="flex-1">Create</Btn>
             </div>
           </div>
         </Modal>
@@ -2428,7 +2996,7 @@ function AdminOrganizations() {
             <Field label="Description" value={editOrg.desc} onChange={(v) => setEditOrg((o) => o ? { ...o, desc: v } : null)} as="textarea" />
             <div className="flex gap-3 pt-2">
               <Btn variant="ghost" onClick={() => setEditOrg(null)} className="flex-1">Cancel</Btn>
-              <Btn variant="primary" onClick={() => { setOrgs((os) => os.map((o) => o.id === editOrg!.id ? editOrg! : o)); setEditOrg(null); }} className="flex-1">Save Changes</Btn>
+              <Btn variant="primary" onClick={handleSaveOrg} className="flex-1">Save Changes</Btn>
             </div>
           </div>
         </Modal>
@@ -2441,7 +3009,7 @@ function AdminOrganizations() {
             <p className="text-slate-500 text-sm mb-6">Are you sure you want to delete <strong>{deleteOrg.name}</strong>? This action cannot be undone.</p>
             <div className="flex gap-3">
               <Btn variant="ghost" onClick={() => setDeleteOrg(null)} className="flex-1">Cancel</Btn>
-              <Btn variant="danger" onClick={() => { setOrgs((os) => os.filter((o) => o.id !== deleteOrg!.id)); setDeleteOrg(null); }} className="flex-1">Confirm Delete</Btn>
+              <Btn variant="danger" onClick={handleDeleteOrg} className="flex-1">Confirm Delete</Btn>
             </div>
           </div>
         </div>
@@ -2453,13 +3021,51 @@ function AdminOrganizations() {
 // ─── ELECTION CREATE WIZARD ───────────────────────────────────────────────────
 
 function ElectionCreate({ onBack }: { onBack: () => void }) {
+  const { refreshElections } = useVoteHubData();
   const [step, setStep] = useState(1);
   const TOTAL = 5;
   const [form, setForm] = useState({ title: "", description: "", openDate: "", openTime: "", closeDate: "", closeTime: "", eligibility: "all", colleges: [] as string[], visibility: "live", positions: ["President", "Vice President", "Secretary"] });
   const [customPos, setCustomPos] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
   const stepLabels = ["Details", "Schedule", "Eligibility", "Visibility", "Positions"];
   const PRESET_POSITIONS = ["President", "Vice President", "Secretary", "Treasurer", "Auditor", "Public Relations Officer", "Business Manager", "Public Information Officer", "Logistics Coordinator", "Year Level Representative", "Program Representative", "Board Member", "Senator", "CCS Representative", "CBA Representative", "CED Representative", "CHSS Representative", "CON Representative", "COL Representative"];
   const addCustomPosition = () => { const val = customPos.trim(); if (val && !form.positions.includes(val)) { setForm((f) => ({ ...f, positions: [...f.positions, val] })); setCustomPos(""); } };
+  const handleCreate = async () => {
+    setError("");
+    if (!form.title || !form.openDate || !form.openTime || !form.closeDate || !form.closeTime) {
+      setError("Complete the election details and schedule before creating.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const eligibility =
+        form.eligibility === "college"
+          ? form.colleges.map((college) => ({ eligibility_type: "COLLEGE_ONLY", college }))
+          : [{ eligibility_type: "ALL_STUDENTS" }];
+      await apiCreateElection({
+        title: form.title,
+        description: form.description,
+        election_type: form.eligibility === "college" ? "COLLEGE" : "UNIVERSITY",
+        start_date: new Date(`${form.openDate}T${form.openTime}`).toISOString(),
+        end_date: new Date(`${form.closeDate}T${form.closeTime}`).toISOString(),
+        result_visibility: form.visibility.toUpperCase() === "LIVE" ? "LIVE" : form.visibility.toUpperCase(),
+        eligibility,
+        positions: form.positions.map((name, index) => ({
+          name,
+          position_scope: name.includes("Representative") ? "COLLEGE" : "UNIVERSITY",
+          max_selection: 1,
+          display_order: index + 1,
+        })),
+      });
+      await refreshElections();
+      onBack();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to create election.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const stepContent = () => {
     switch (step) {
@@ -2556,9 +3162,12 @@ function ElectionCreate({ onBack }: { onBack: () => void }) {
         <h2 className="text-sm font-semibold text-[#0F172A] mb-6">{stepLabels[step - 1]}</h2>
         {stepContent()}
       </div>
+      {error && <div className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs font-medium text-red-600 mb-4">{error}</div>}
       <div className="flex justify-between">
         <Btn variant="ghost" onClick={() => step > 1 ? setStep((s) => s - 1) : onBack()} className="text-slate-600">{step === 1 ? "Cancel" : "Back"}</Btn>
-        <Btn variant="primary" onClick={() => step < TOTAL ? setStep((s) => s + 1) : onBack()}>{step === TOTAL ? "Create Election" : "Continue"} <ChevronRight className="w-4 h-4" /></Btn>
+        <Btn variant="primary" onClick={() => step < TOTAL ? setStep((s) => s + 1) : handleCreate()} disabled={loading}>
+          {loading ? "Creating..." : step === TOTAL ? "Create Election" : "Continue"} <ChevronRight className="w-4 h-4" />
+        </Btn>
       </div>
     </div>
   );
@@ -2721,21 +3330,75 @@ function CandidatesAnalyticsTab() {
 const CHART_COLORS = ["#2563EB", "#7C3AED", "#059669", "#D97706", "#DC2626", "#0891B2", "#64748B"];
 
 function AnalyticsPage() {
-  const [selectedElId, setSelectedElId] = useState(elections[0].id);
+  const { elections: liveElections } = useVoteHubData();
+  const analyticsElections = liveElections.length ? liveElections : elections;
+  const [selectedElId, setSelectedElId] = useState(analyticsElections[0]?.id ?? 1);
   const [activeTab, setActiveTab] = useState("overview");
-  const [compareElId, setCompareElId] = useState(elections[3].id);
+  const [compareElId, setCompareElId] = useState(analyticsElections[3]?.id ?? analyticsElections[0]?.id ?? 1);
+  const [analytics, setAnalytics] = useState<ElectionAnalytics | null>(null);
   const [tick, setTick] = useState(0);
   const [showExportModal, setShowExportModal] = useState(false);
 
   useEffect(() => {
-    if (elections.find(e => e.id === selectedElId)?.status === "active") {
+    if (analyticsElections.length > 0 && !analyticsElections.some((e) => e.id === selectedElId)) {
+      setSelectedElId(analyticsElections[0].id);
+    }
+    if (analyticsElections.length > 1 && !analyticsElections.some((e) => e.id === compareElId && e.id !== selectedElId)) {
+      setCompareElId((analyticsElections.find((e) => e.id !== selectedElId) ?? analyticsElections[0]).id);
+    }
+  }, [analyticsElections, compareElId, selectedElId]);
+
+  useEffect(() => {
+    getElectionAnalytics(selectedElId)
+      .then(setAnalytics)
+      .catch(() => setAnalytics(null));
+  }, [selectedElId]);
+
+  useEffect(() => {
+    if (analyticsElections.find(e => e.id === selectedElId)?.status === "active") {
       const t = setInterval(() => setTick(n => n + 5), 5000);
       return () => clearInterval(t);
     }
-  }, [selectedElId]);
+  }, [analyticsElections, selectedElId]);
 
-  const sel = elections.find(e => e.id === selectedElId) ?? elections[0];
+  const sel = analyticsElections.find(e => e.id === selectedElId) ?? analyticsElections[0] ?? elections[0];
   const isLive = sel.status === "active";
+  const selectedAnalytics = analytics?.event_id === selectedElId ? analytics : null;
+  const collegeAnalyticsData = selectedAnalytics?.by_college?.length
+    ? selectedAnalytics.by_college.map((bucket, index) => ({
+        college: bucket.label,
+        fullName: bucket.label,
+        votes: bucket.votes,
+        eligible: bucket.eligible,
+        rate: Number(bucket.rate.toFixed(1)),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      }))
+    : analyticsCollegeData;
+  const yearAnalyticsData = selectedAnalytics?.by_year_level?.length
+    ? selectedAnalytics.by_year_level.map((bucket, index) => ({
+        year: bucket.label,
+        votes: bucket.votes,
+        eligible: bucket.eligible,
+        rate: Number(bucket.rate.toFixed(1)),
+        color: CHART_COLORS[index % CHART_COLORS.length],
+      }))
+    : analyticsYearData;
+  const orgAnalyticsData = selectedAnalytics?.by_organization?.length
+    ? selectedAnalytics.by_organization.map((bucket) => ({
+        org: bucket.label,
+        members: bucket.eligible,
+        votes: bucket.votes,
+        rate: Number(bucket.rate.toFixed(1)),
+      }))
+    : analyticsOrgData;
+  const hourlyAnalyticsData = selectedAnalytics?.hourly_votes?.length
+    ? selectedAnalytics.hourly_votes.map((bucket) => ({
+        time: bucket.label,
+        votes: bucket.votes,
+        cumulative: bucket.cumulative,
+      }))
+    : hourlyVotingData;
+  const overviewSummary = selectedAnalytics?.summary;
 
   const tabs = [
     { id: "overview", label: "Overview" },
@@ -2747,10 +3410,10 @@ function AnalyticsPage() {
   ];
 
   const summaryMetrics = [
-    { label: "Eligible Voters", value: "3,500", delta: 8.2, sub: "Total registered", icon: Users2 },
-    { label: "Votes Cast", value: "2,947", delta: 12.1, sub: "Ballots submitted", icon: Vote },
-    { label: "Participation Rate", value: "84.2%", delta: 5.4, sub: "vs. 78.8% last year", icon: TrendingUp },
-    { label: "Abstention Rate", value: "15.8%", delta: -5.4, sub: "Non-voters (no selection)", icon: Activity },
+    { label: "Eligible Voters", value: (overviewSummary?.total_students ?? 3500).toLocaleString(), delta: 8.2, sub: "Total registered", icon: Users2 },
+    { label: "Votes Cast", value: (overviewSummary?.votes_cast ?? 2947).toLocaleString(), delta: 12.1, sub: "Ballots submitted", icon: Vote },
+    { label: "Participation Rate", value: `${Number((overviewSummary?.participation_rate ?? 84.2).toFixed(1))}%`, delta: 5.4, sub: "Eligible voters", icon: TrendingUp },
+    { label: "Active Students", value: (overviewSummary?.active_students ?? 3500).toLocaleString(), delta: -5.4, sub: "Can participate", icon: Activity },
     { label: "Candidates", value: "12", sub: "Across 4 positions", icon: UserCircle },
     { label: "Positions", value: "4", sub: "Open for voting", icon: FileText },
     { label: "Duration", value: "48 hrs", sub: "Jun 25–27, 2025", icon: Clock },
@@ -2780,7 +3443,7 @@ function AnalyticsPage() {
           <div className="relative">
             <select value={selectedElId} onChange={(e) => { setSelectedElId(Number(e.target.value)); setTick(0); setActiveTab("overview"); }}
               className="w-full appearance-none pl-3.5 pr-9 py-2.5 rounded-xl border border-slate-200 bg-white text-[#0F172A] text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]">
-              {elections.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
+              {analyticsElections.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
             </select>
             <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
           </div>
@@ -2814,7 +3477,7 @@ function AnalyticsPage() {
                   <span className="text-xs text-slate-400">% of eligible voters</span>
                 </div>
                 <div className="flex flex-col gap-3">
-                  {analyticsCollegeData.map((d) => (
+                  {collegeAnalyticsData.map((d) => (
                     <div key={d.college}>
                       <div className="flex items-center justify-between mb-1.5">
                         <span className="text-xs font-semibold text-[#0F172A]">{d.college}</span>
@@ -2836,14 +3499,14 @@ function AnalyticsPage() {
                 <p className="text-xs text-slate-400 mb-4">Share of total votes cast</p>
                 <ResponsiveContainer width="100%" height={220}>
                   <PieChart>
-                    <Pie data={analyticsCollegeData} cx="50%" cy="50%" innerRadius={55} outerRadius={85} dataKey="votes" paddingAngle={3}>
-                      {analyticsCollegeData.map((entry, i) => <Cell key={i} fill={entry.color} stroke="none" />)}
+                    <Pie data={collegeAnalyticsData} cx="50%" cy="50%" innerRadius={55} outerRadius={85} dataKey="votes" paddingAngle={3}>
+                      {collegeAnalyticsData.map((entry, i) => <Cell key={i} fill={entry.color} stroke="none" />)}
                     </Pie>
                     <Tooltip formatter={(v: number) => [v.toLocaleString(), "Votes"]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E2E8F0" }} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
-                  {analyticsCollegeData.map(d => (
+                  {collegeAnalyticsData.map(d => (
                     <div key={d.college} className="flex items-center gap-1">
                       <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
                       <span className="text-[10px] text-slate-500">{d.college}</span>
@@ -2896,7 +3559,7 @@ function AnalyticsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...analyticsCollegeData].sort((a, b) => b.rate - a.rate).map((d, i) => {
+                    {[...collegeAnalyticsData].sort((a, b) => b.rate - a.rate).map((d, i) => {
                       const avg = 75;
                       const diff = d.rate - avg;
                       return (
@@ -2935,13 +3598,13 @@ function AnalyticsPage() {
               <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
                 <h3 className="font-semibold text-[#0F172A] text-sm mb-5">Participation by Year Level</h3>
                 <ResponsiveContainer width="100%" height={240}>
-                  <BarChart data={analyticsYearData}>
+                  <BarChart data={yearAnalyticsData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                     <XAxis dataKey="year" tick={{ fontSize: 10, fill: "#94A3B8" }} />
                     <YAxis tick={{ fontSize: 10, fill: "#94A3B8" }} domain={[0, 100]} tickFormatter={v => `${v}%`} />
                     <Tooltip formatter={(v: number) => [`${v}%`, "Turnout"]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E2E8F0" }} />
                     <Bar dataKey="rate" radius={[4, 4, 0, 0]}>
-                      {analyticsYearData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                      {yearAnalyticsData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -2952,14 +3615,14 @@ function AnalyticsPage() {
                 <p className="text-xs text-slate-400 mb-4">Votes cast by academic year</p>
                 <ResponsiveContainer width="100%" height={200}>
                   <PieChart>
-                    <Pie data={analyticsYearData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="votes" paddingAngle={2}>
-                      {analyticsYearData.map((entry, i) => <Cell key={i} fill={entry.color} stroke="none" />)}
+                    <Pie data={yearAnalyticsData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="votes" paddingAngle={2}>
+                      {yearAnalyticsData.map((entry, i) => <Cell key={i} fill={entry.color} stroke="none" />)}
                     </Pie>
                     <Tooltip formatter={(v: number) => [v.toLocaleString(), "Votes"]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E2E8F0" }} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="grid grid-cols-3 gap-2 mt-2">
-                  {analyticsYearData.map(d => (
+                  {yearAnalyticsData.map(d => (
                     <div key={d.year} className="flex items-center gap-1.5">
                       <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
                       <span className="text-[10px] text-slate-500">{d.year} <span className="font-bold text-slate-700">{d.rate}%</span></span>
@@ -2975,7 +3638,7 @@ function AnalyticsPage() {
                 <h3 className="font-semibold text-[#0F172A] text-sm">Organization Participation — Ranked by Rate</h3>
               </div>
               <div className="divide-y divide-slate-50">
-                {[...analyticsOrgData].sort((a, b) => b.rate - a.rate).map((o, i) => (
+                {[...orgAnalyticsData].sort((a, b) => b.rate - a.rate).map((o, i) => (
                   <div key={o.org} className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50 transition-colors">
                     <span className="text-xs font-bold text-slate-400 font-mono w-5 shrink-0">#{i + 1}</span>
                     <div className="flex-1 min-w-0">
@@ -3050,7 +3713,7 @@ function AnalyticsPage() {
                 </div>
               </div>
               <ResponsiveContainer width="100%" height={260}>
-                <AreaChart data={hourlyVotingData}>
+                <AreaChart data={hourlyAnalyticsData}>
                   <defs>
                     <linearGradient id="hvg" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#2563EB" stopOpacity={0.2} />
@@ -3075,7 +3738,7 @@ function AnalyticsPage() {
                 </div>
               </div>
               <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={hourlyVotingData}>
+                <LineChart data={hourlyAnalyticsData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
                   <XAxis dataKey="time" tick={{ fontSize: 11, fill: "#94A3B8" }} />
                   <YAxis tick={{ fontSize: 11, fill: "#94A3B8" }} />
@@ -3201,7 +3864,7 @@ function AnalyticsPage() {
                   <div className="relative">
                     <select value={selectedElId} onChange={e => setSelectedElId(Number(e.target.value))}
                       className="w-full appearance-none pl-3.5 pr-9 py-2.5 rounded-xl border border-[#2563EB] bg-blue-50 text-[#0F172A] text-sm focus:outline-none focus:ring-2 focus:ring-[#2563EB]">
-                      {elections.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
+                      {analyticsElections.map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
                     </select>
                     <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#2563EB] pointer-events-none" />
                   </div>
@@ -3211,7 +3874,7 @@ function AnalyticsPage() {
                   <div className="relative">
                     <select value={compareElId} onChange={e => setCompareElId(Number(e.target.value))}
                       className="w-full appearance-none pl-3.5 pr-9 py-2.5 rounded-xl border border-[#0A2540] bg-slate-50 text-[#0F172A] text-sm focus:outline-none focus:ring-2 focus:ring-[#0A2540]">
-                      {elections.filter(e => e.id !== selectedElId).map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
+                      {analyticsElections.filter(e => e.id !== selectedElId).map(e => <option key={e.id} value={e.id}>{e.title}</option>)}
                     </select>
                     <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#0A2540] pointer-events-none" />
                   </div>
@@ -3344,6 +4007,31 @@ export default function App() {
   const [view, setView] = useState<View>(getInitialView);
   const [role, setRole] = useState<Role>(null);
   const [currentUser, setCurrentUser] = useState<AppUser>(mockStudent);
+  const [liveElections, setLiveElections] = useState<ElectionItem[]>(elections);
+  const [livePositions] = useState<PositionItem[]>(positions);
+  const [liveResults, setLiveResults] = useState<ElectionResultsMap>(electionResultsData);
+  const [selectedElectionId, setSelectedElectionId] = useState<number>(elections[0].id);
+
+  const refreshElections = useCallback(async () => {
+    const apiElections = await listElections();
+    const mapped = apiElections.map(mapApiElection);
+    setLiveElections(mapped.length > 0 ? mapped : elections);
+    if (mapped.length > 0) {
+      setSelectedElectionId((current) => (mapped.some((election) => election.id === current) ? current : mapped[0].id));
+    }
+  }, []);
+
+  const setElectionResults = useCallback((eventId: number, results: ElectionResultsMap[number]) => {
+    setLiveResults((current) => ({ ...current, [eventId]: results }));
+  }, []);
+
+  const dataContext = useMemo<VoteHubDataContextValue>(() => ({
+    elections: liveElections,
+    positions: livePositions,
+    electionResultsData: liveResults,
+    refreshElections,
+    setElectionResults,
+  }), [liveElections, livePositions, liveResults, refreshElections, setElectionResults]);
 
   const goTo = (nextView: View, path?: string) => {
     setView(nextView);
@@ -3351,6 +4039,24 @@ export default function App() {
       window.history.pushState(null, "", path);
     }
   };
+
+  useEffect(() => {
+    if (!getToken()) return;
+    getMe()
+      .then((user) => {
+        const appUser = toAppUser(user);
+        setRole(appUser.role);
+        setCurrentUser(appUser);
+        setView(appUser.role === "admin" ? "admin-dashboard" : "student-dashboard");
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", appUser.role === "admin" ? "/admin" : "/");
+        }
+      })
+      .then(() => refreshElections())
+      .catch(() => {
+        clearToken();
+      });
+  }, [refreshElections]);
 
   useEffect(() => {
     const syncPath = () => {
@@ -3365,18 +4071,20 @@ export default function App() {
     return () => window.removeEventListener("popstate", syncPath);
   }, [role, view]);
 
-  const handleLogin = (r: Role) => {
+  const handleLogin = (r: Role, user: AppUser) => {
     setRole(r);
-    setCurrentUser(r === "admin" ? mockAdmin : mockStudent);
+    setCurrentUser(user);
     setView(r === "admin" ? "admin-dashboard" : "student-dashboard");
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", r === "admin" ? "/admin" : "/");
     }
+    refreshElections().catch(() => {});
   };
 
   const handleSignOut = () => {
     const nextView = role === "admin" ? "admin-login" : "landing";
     const nextPath = role === "admin" ? "/admin" : "/";
+    clearToken();
     setRole(null);
     goTo(nextView, nextPath);
   };
@@ -3386,12 +4094,22 @@ export default function App() {
   if (view === "admin-login") return <LoginPage mode="admin" onLogin={handleLogin} />;
   if (view === "register") return <RegisterPage onBack={() => goTo("login", "/")} onRegister={() => goTo("login", "/")} />;
 
+  const openVoting = (eventId: number) => {
+    setSelectedElectionId(eventId);
+    setView("voting");
+  };
+
+  const openResults = (eventId: number) => {
+    setSelectedElectionId(eventId);
+    setView("results");
+  };
+
   const page = () => {
     switch (view) {
-      case "student-dashboard": return <StudentDashboard user={currentUser} onVote={() => setView("voting")} onResults={() => setView("results")} />;
-      case "elections-list": return <ElectionsList onVote={() => setView("voting")} onResults={() => setView("results")} />;
-      case "voting": return <VotingPage user={currentUser} onBack={() => setView("student-dashboard")} />;
-      case "results": return <ResultsPage />;
+      case "student-dashboard": return <StudentDashboard user={currentUser} onVote={openVoting} onResults={openResults} />;
+      case "elections-list": return <ElectionsList onVote={openVoting} onResults={openResults} />;
+      case "voting": return <VotingPage user={currentUser} eventId={selectedElectionId} onBack={() => setView("student-dashboard")} />;
+      case "results": return <ResultsPage selectedElectionId={selectedElectionId} />;
       case "profile": return <ProfilePage user={currentUser} onSignOut={handleSignOut} />;
       case "notifications": return <NotificationsPage />;
       case "analytics": return <AnalyticsPage />;
@@ -3400,13 +4118,15 @@ export default function App() {
       case "admin-elections": return <AdminElections onCreateElection={() => setView("election-create")} onAnalytics={() => setView("analytics")} />;
       case "admin-organizations": return <AdminOrganizations />;
       case "election-create": return <ElectionCreate onBack={() => setView(role === "admin" ? "admin-elections" : "student-dashboard")} />;
-      default: return <StudentDashboard user={currentUser} onVote={() => setView("voting")} onResults={() => setView("results")} />;
+      default: return <StudentDashboard user={currentUser} onVote={openVoting} onResults={openResults} />;
     }
   };
 
   return (
-    <AppShell view={view} onNavigate={(v) => setView(v as View)} onSignOut={handleSignOut} role={role} user={currentUser}>
-      {page()}
-    </AppShell>
+    <VoteHubDataContext.Provider value={dataContext}>
+      <AppShell view={view} onNavigate={(v) => setView(v as View)} onSignOut={handleSignOut} role={role} user={currentUser}>
+        {page()}
+      </AppShell>
+    </VoteHubDataContext.Provider>
   );
 }
